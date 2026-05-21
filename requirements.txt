@@ -5,6 +5,9 @@ pyqtgraph      # viewport 3D (OpenGL) + wykresy diagnostyczne
 # --- Obliczenia numeryczne ---
 numpy          # wektory, interpolacja, macierze
 
+# --- Nagrywanie ---
+opencv-python  
+
 # --- Geometria i G-code ---
 pygcode        # parser G-code (G0/G1/M104 itp.)
 trimesh        # wczytywanie modeli STL
@@ -16,3 +19,4 @@ pymunk         # silnik fizyki 2.5D (kolizje, ograniczenia)
 # --- Opcjonalne (przyspieszenie obliczeń) ---
 numba          # JIT-kompilacja krytycznych fragmentów symulacji
 ursina         # alternatywny silnik 3D (zarezerwowany do rozbudowy)
+ 

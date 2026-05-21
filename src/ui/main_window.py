@@ -19,9 +19,10 @@ from PyQt6.QtWidgets import (
 
 from src.core.gcode_parser import parse_gcode_file
 from src.core.types import PrinterConfig
-from src.io.session_replay import export_frames
+from src.io.session_replay import export_frames , VideoRenderManager
 from src.render.scene3d import Scene3DWidget
 from src.sim.simulator import PrinterSimulator, SimulationFrame
+
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +138,11 @@ class MainWindow(QMainWindow):
         export_btn = QPushButton("Zapisz sesję (JSON)")
         export_btn.clicked.connect(self.export_replay)
         sidebar_layout.addWidget(export_btn)
+
+
+        self.record_btn = QPushButton("Konwertuj sesję (JSON --> MP4)")
+        self.record_btn.clicked.connect(self.on_click_render)
+        sidebar_layout.addWidget(self.record_btn)
 
         self._speed_label = QLabel("Prędkość: 5×")
         sidebar_layout.addWidget(self._speed_label)
@@ -289,3 +295,57 @@ class MainWindow(QMainWindow):
         if filename:
             export_frames(filename, self.frames)
             self.status_label.setText(f"Sesja zapisana: {Path(filename).name}")
+
+    def on_click_render(self) -> None:
+        # Jeśli renderowanie już trwa, kliknięcie oznacza akcję "Anuluj"
+        if hasattr(self, '_render_timer') and self._render_timer.isActive():
+            self._render_timer.stop()
+            if hasattr(self, '_render_manager') and self._render_manager:
+                self._render_manager.close()
+            self.status_label.setText("Renderowanie zostało przerwane przez użytkownika.")
+            self._cleanup_render_ui()
+            return
+
+        json_file, _ = QFileDialog.getOpenFileName(self, "Wybierz plik sesji JSON", "", "JSON (*.json)")
+        if not json_file: return
+
+        mp4_file, _ = QFileDialog.getSaveFileName(self, "Zapisz wideo jako...", "render.mp4", "Wideo MP4 (*.mp4)")
+        if not mp4_file: return
+
+        try:
+            self._render_manager = VideoRenderManager(self.scene, json_file, mp4_file, fps=60, step=10)
+        except Exception as e:
+            self.status_label.setText(f"Błąd inicjalizacji managera: {str(e)}")
+            return
+
+        if self._render_manager.total_frames == 0:
+            self.status_label.setText("Błąd: Wybrany plik JSON nie zawiera klatek.")
+            return
+
+        # Zmiana wyglądu okna (UI) na czas pracy
+        self.load_btn.setEnabled(False)
+        self.record_btn.setText("Anuluj renderowanie")
+        self.status_label.setText("Rozpoczynam renderowanie klatek...")
+
+        # Uruchomienie cyklicznego timera okna
+        self._render_timer = QTimer(self)
+        self._render_timer.timeout.connect(self._on_render_timer_tick)
+        self._render_timer.start(0)
+
+    def _on_render_timer_tick(self) -> None:
+        current, total = self._render_manager.render_next_step()
+
+        if current % 5 == 0 or current == total:
+            percentage = (current / total) * 100
+            self.status_label.setText(f"Renderowanie MP4: {current}/{total} klatek ({percentage:.1f}%)")
+
+        if self._render_manager.is_finished():
+            self._render_timer.stop()
+            self._render_manager.close()
+            self.status_label.setText("Sukces! Wideo zostało pomyślnie zapisane.")
+            self._cleanup_render_ui()
+
+    def _cleanup_render_ui(self) -> None:
+        self.load_btn.setEnabled(True)
+        self.record_btn.setText("Konwertuj sesję (JSON --> MP4)")
+        self._render_manager = None

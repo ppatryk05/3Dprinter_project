@@ -43,6 +43,11 @@ Aktywacja na **macOS / Linux**:
 ```
 source .venv/bin/activate
 ```
+Jesli PowerShell blokuje skrypty, wykonaj raz:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
 
 ### 3. Zainstaluj zależności
 
