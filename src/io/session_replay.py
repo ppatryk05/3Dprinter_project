@@ -24,6 +24,7 @@ def export_frames(path: str | Path, frames: Iterable[SimulationFrame]) -> None:
             "nozzle_temp": frame.state.nozzle_temp,
             "bed_temp": frame.state.bed_temp,
             "issues": frame.issues,
+            "path_kind": frame.path_kind,
         }
         for frame in frames
     ]
@@ -45,7 +46,11 @@ def import_frames(path: str | Path) -> List[SimulationFrame]:
             bed_temp=item["bed_temp"],
             alarms=[],
         )
-        frames.append(SimulationFrame(state=state, issues=item.get("issues", [])))
+        frames.append(SimulationFrame(
+            state=state,
+            issues=item.get("issues", []),
+            path_kind=item.get("path_kind", "model"),
+        ))
     return frames
 
 class VideoRenderManager:

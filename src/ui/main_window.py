@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 
 from src.core.gcode_parser import parse_gcode_file
 from src.core.types import PrinterConfig
-from src.io.session_replay import export_frames , VideoRenderManager
+from src.io.session_replay import export_frames, import_frames, VideoRenderManager
 from src.render.scene3d import Scene3DWidget
 from src.sim.simulator import PrinterSimulator, SimulationFrame
 
@@ -139,6 +139,9 @@ class MainWindow(QMainWindow):
         export_btn.clicked.connect(self.export_replay)
         sidebar_layout.addWidget(export_btn)
 
+        import_btn = QPushButton("Wczytaj sesję (JSON)")
+        import_btn.clicked.connect(self.import_replay)
+        sidebar_layout.addWidget(import_btn)
 
         self.record_btn = QPushButton("Konwertuj sesję (JSON --> MP4)")
         self.record_btn.clicked.connect(self.on_click_render)
@@ -159,6 +162,27 @@ class MainWindow(QMainWindow):
         self._travel_cb.setChecked(True)
         self._travel_cb.toggled.connect(self.scene.set_show_travel)
         sidebar_layout.addWidget(self._travel_cb)
+
+        self._support_cb = QCheckBox("Pokaż podpory (niebieskie)")
+        self._support_cb.setChecked(True)
+        self._support_cb.toggled.connect(self.scene.set_show_support)
+        sidebar_layout.addWidget(self._support_cb)
+
+        self._shadow_cb = QCheckBox("Pokaż cień na stole")
+        self._shadow_cb.setChecked(True)
+        self._shadow_cb.toggled.connect(self.scene.set_show_shadow)
+        sidebar_layout.addWidget(self._shadow_cb)
+
+        # ── Statistics panel ──────────────────────────────────────────────
+        sidebar_layout.addWidget(QLabel("Statystyki:"))
+        self._stat_progress = QLabel("Postęp:  0.0 %")
+        self._stat_time     = QLabel("Czas:    0:00")
+        self._stat_layer    = QLabel("Warstwa: Z = 0.00 mm")
+        self._stat_filament = QLabel("Filament: 0.0 mm  (0.00 g)")
+        for lbl in (self._stat_progress, self._stat_time,
+                    self._stat_layer, self._stat_filament):
+            lbl.setStyleSheet("font-family: monospace; font-size: 11px;")
+            sidebar_layout.addWidget(lbl)
 
         sidebar_layout.addWidget(QLabel("Temperatura [°C]:"))
         self.temp_plot = pg.PlotWidget()
@@ -249,8 +273,31 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Restart – naciśnij Play aby zacząć od nowa")
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        if event.key() == Qt.Key.Key_Space:
+        key = event.key()
+        if key == Qt.Key.Key_Space:
             self.toggle_play()
+        elif key == Qt.Key.Key_R:
+            self.restart()
+        elif key == Qt.Key.Key_Left:
+            # Step back (pause first)
+            self.playing = False
+            steps = self.speed.value()
+            self.frame_idx = max(0, self.frame_idx - steps)
+            if self.frames:
+                previous = self.frames[self.frame_idx - 1] if self.frame_idx > 0 else None
+                self.scene.update_frame(previous, self.frames[self.frame_idx])
+        elif key == Qt.Key.Key_Right:
+            # Step forward (pause first)
+            self.playing = False
+            steps = self.speed.value()
+            self.frame_idx = min(len(self.frames) - 1, self.frame_idx + steps)
+            if self.frames:
+                previous = self.frames[self.frame_idx - 1] if self.frame_idx > 0 else None
+                self.scene.update_frame(previous, self.frames[self.frame_idx])
+        elif key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self.speed.setValue(min(50, self.speed.value() + 5))
+        elif key == Qt.Key.Key_Minus:
+            self.speed.setValue(max(1, self.speed.value() - 5))
         else:
             super().keyPressEvent(event)
 
@@ -277,7 +324,21 @@ class MainWindow(QMainWindow):
             if frame.issues:
                 info = "⚠ " + " | ".join(frame.issues) + "  |  " + info
             self.status_label.setText(info)
+            self._update_stats(frame)
             self.frame_idx += 1
+
+    def _update_stats(self, frame: SimulationFrame) -> None:
+        s = frame.state
+        total = max(1, len(self.frames))
+        pct   = self.frame_idx / total * 100
+        mins  = int(s.t) // 60
+        secs  = int(s.t) % 60
+        # Rough PLA mass: π*(1.75/2)²*1.24 g/cm³ ≈ 0.00292 g/mm of filament
+        grams = s.e * 0.00292
+        self._stat_progress.setText(f"Postęp:  {pct:.1f} %  ({self.frame_idx}/{total})")
+        self._stat_time.setText(    f"Czas:    {mins}:{secs:02d}")
+        self._stat_layer.setText(   f"Warstwa: Z = {s.z:.2f} mm")
+        self._stat_filament.setText(f"Filament: {s.e:.1f} mm  ({grams:.2f} g)")
 
     def _refresh_charts(self) -> None:
         t = [f.state.t for f in self.frames]
@@ -295,6 +356,26 @@ class MainWindow(QMainWindow):
         if filename:
             export_frames(filename, self.frames)
             self.status_label.setText(f"Sesja zapisana: {Path(filename).name}")
+
+    def import_replay(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Wczytaj sesję", "", "JSON (*.json)",
+        )
+        if not filename:
+            return
+        try:
+            frames = import_frames(filename)
+        except Exception as exc:
+            self.status_label.setText(f"Błąd wczytywania sesji: {exc}")
+            return
+        self.frames    = frames
+        self.frame_idx = 0
+        self.playing   = False
+        self.scene.reset_scene()
+        self._refresh_charts()
+        self.status_label.setText(
+            f"Sesja wczytana: {Path(filename).name}  ({len(frames)} kroków)"
+        )
 
     def on_click_render(self) -> None:
         # Jeśli renderowanie już trwa, kliknięcie oznacza akcję "Anuluj"

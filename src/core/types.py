@@ -3,6 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+# ---------------------------------------------------------------------------
+# Shared simulation constants
+# ---------------------------------------------------------------------------
+MIN_EXTRUDE_TEMP: float = 160.0   # °C – below this E advancement is blocked
+WAIT_STEP_S:      float = 0.25    # simulation-time step per heating frame (s)
+HEAT_WAIT_DT:     float = 2.0     # thermal dt per heating frame (faster than real)
+
 
 @dataclass(slots=True)
 class MotionCommand:
@@ -14,6 +21,9 @@ class MotionCommand:
     f: Optional[float] = None
     nozzle_temp: Optional[float] = None
     bed_temp: Optional[float] = None
+    path_kind: str = "model"      # "model" | "support" (from ;TYPE: comments)
+    i: Optional[float] = None     # arc centre offset X (G2/G3)
+    j: Optional[float] = None     # arc centre offset Y (G2/G3)
 
 
 @dataclass(slots=True)

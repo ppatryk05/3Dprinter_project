@@ -15,6 +15,4 @@ class CollisionDetector:
             issues.append("Head out of bounds on Y")
         if not (0.0 <= state.z <= self.config.build_z):
             issues.append("Head out of bounds on Z")
-        if state.z < 0.2 and state.nozzle_temp < 170.0:
-            issues.append("Cold extrusion risk near print bed")
         return issues

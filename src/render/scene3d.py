@@ -4,7 +4,7 @@ import numpy as np
 import pyqtgraph.opengl as gl
 from pyqtgraph.opengl.MeshData import MeshData
 
-from src.core.types import PrinterConfig
+from src.core.types import MIN_EXTRUDE_TEMP, PrinterConfig
 from src.sim.simulator import SimulationFrame
 
 # ---------------------------------------------------------------------------
@@ -27,6 +27,7 @@ C_HEATER_BLK = (0.82, 0.36, 0.04, 1.0)
 C_NOZZLE     = (0.75, 0.60, 0.10, 1.0)
 C_NOZZLE_TIP = (1.00, 0.72, 0.15, 1.0)
 C_FILAMENT   = (1.00, 0.45, 0.02, 1.0)
+C_SUPPORT    = (0.15, 0.55, 1.00, 1.0)   # blue – support structures
 C_TRAVEL     = (0.20, 0.55, 1.00, 0.55)
 
 
@@ -111,8 +112,11 @@ class Scene3DWidget(gl.GLViewWidget):
         self.BX: float = cfg.build_x
         self.BY: float = cfg.build_y
         self.BZ: float = cfg.build_z
-        self._dep_pts:    list[list[float]] = []
-        self._travel_pts: list[list[float]] = []
+        self._dep_pts:     list[list[float]] = []
+        self._dep_colors:  list[list[float]] = []   # per-vertex RGBA for Z-gradient
+        self._shadow_pts:  list[list[float]] = []   # same XY as dep, Z=0.5 (shadow)
+        self._support_pts: list[list[float]] = []
+        self._travel_pts:  list[list[float]] = []
 
         super().__init__(parent=parent)
         self.setBackgroundColor((210, 212, 218, 255))
@@ -250,11 +254,25 @@ class Scene3DWidget(gl.GLViewWidget):
         self._fil_strand.setVisible(False)
 
         # ── Print paths (opaque so meshes occlude them correctly) ─────────
+        # Shadow: flat projection on bed (Z=0.5), dark semi-transparent
+        self._shadow_lines = gl.GLLinePlotItem(
+            pos=np.empty((0,3)), color=(0.0, 0.0, 0.0, 0.20), width=7,
+            mode='lines', antialias=True,
+        )
+        self._shadow_lines.setGLOptions('opaque')
+
+        # Deposition path with per-vertex Z-gradient colour
         self._deposition = gl.GLLinePlotItem(
             pos=np.empty((0,3)), color=C_FILAMENT, width=11,
             mode='lines', antialias=True,
         )
         self._deposition.setGLOptions('opaque')
+
+        self._support_lines = gl.GLLinePlotItem(
+            pos=np.empty((0,3)), color=C_SUPPORT, width=9,
+            mode='lines', antialias=True,
+        )
+        self._support_lines.setGLOptions('opaque')
 
         self._travel_lines = gl.GLLinePlotItem(
             pos=np.empty((0,3)), color=C_TRAVEL, width=1.5,
@@ -263,9 +281,10 @@ class Scene3DWidget(gl.GLViewWidget):
         self._travel_lines.setGLOptions('opaque')
         self._travel_lines.setVisible(True)
 
-        # Add paths first so meshes render on top of them
+        # Add paths first (shadow → colour paths → meshes on top)
         for item in [
-            self._deposition, self._travel_lines,
+            self._shadow_lines,
+            self._deposition, self._support_lines, self._travel_lines,
             self._xrail_f, self._xrail_b,
             self._zcar_l, self._zcar_r,
             self._toolhead, self._fan_body,
@@ -329,10 +348,21 @@ class Scene3DWidget(gl.GLViewWidget):
     def set_show_travel(self, visible: bool) -> None:
         self._travel_lines.setVisible(visible)
 
+    def set_show_support(self, visible: bool) -> None:
+        self._support_lines.setVisible(visible)
+
+    def set_show_shadow(self, visible: bool) -> None:
+        self._shadow_lines.setVisible(visible)
+
     def reset_scene(self) -> None:
-        self._dep_pts    = []
-        self._travel_pts = []
+        self._dep_pts      = []
+        self._dep_colors   = []
+        self._shadow_pts   = []
+        self._support_pts  = []
+        self._travel_pts   = []
         self._deposition.setData(pos=np.empty((0, 3)))
+        self._shadow_lines.setData(pos=np.empty((0, 3)))
+        self._support_lines.setData(pos=np.empty((0, 3)))
         self._travel_lines.setData(pos=np.empty((0, 3)))
         self._update_moving_parts(self.BX / 2, self.BY / 2, 5.0, extruding=False)
 
@@ -340,10 +370,21 @@ class Scene3DWidget(gl.GLViewWidget):
     # Filters interpolation micro-steps that create a "dashed" appearance.
     _MIN_SEG_MM = 0.25
 
+    def _z_color(self, z: float) -> list[float]:
+        """Z-gradient: dark orange at bed → bright yellow at top of build volume."""
+        t = min(1.0, max(0.0, z / self.BZ))
+        return [1.0, 0.25 + t * 0.60, 0.02 + t * 0.08, 1.0]
+
     def update_frame(self, previous: SimulationFrame | None,
                      frame: SimulationFrame) -> None:
         sx, sy, sz = frame.state.x, frame.state.y, frame.state.z
-        extruding = previous is not None and frame.state.e > previous.state.e
+
+        # Extrusion is only valid when nozzle is hot enough
+        extruding = (
+            previous is not None
+            and frame.state.e > previous.state.e
+            and frame.state.nozzle_temp >= MIN_EXTRUDE_TEMP
+        )
         self._update_moving_parts(sx, sy, sz, extruding=extruding)
 
         if previous is not None:
@@ -353,8 +394,20 @@ class Scene3DWidget(gl.GLViewWidget):
                 return  # skip sub-threshold micro-segments
             seg = [[px, py, pz], [sx, sy, sz]]
             if extruding:
-                self._dep_pts.extend(seg)
-                self._deposition.setData(pos=np.array(self._dep_pts))
+                if frame.path_kind == "support":
+                    self._support_pts.extend(seg)
+                    self._support_lines.setData(pos=np.array(self._support_pts))
+                else:
+                    # Z-gradient colours (per-vertex, parallel to _dep_pts)
+                    self._dep_colors.extend([self._z_color(pz), self._z_color(sz)])
+                    self._dep_pts.extend(seg)
+                    self._deposition.setData(
+                        pos=np.array(self._dep_pts),
+                        color=np.array(self._dep_colors, dtype=np.float32),
+                    )
+                    # Shadow: same XY but at Z=0.5 (flat projection on bed)
+                    self._shadow_pts.extend([[px, py, 0.5], [sx, sy, 0.5]])
+                    self._shadow_lines.setData(pos=np.array(self._shadow_pts))
             else:
                 self._travel_pts.extend(seg)
                 self._travel_lines.setData(pos=np.array(self._travel_pts))

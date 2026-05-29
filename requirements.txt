@@ -1,6 +1,8 @@
 # --- Wizualizacja 3D i GUI ---
 pyqt6          # okno główne, kontrolki, wykresy
 pyqtgraph      # viewport 3D (OpenGL) + wykresy diagnostyczne
+PyOpenGL       # wymagane przez pyqtgraph.opengl
+PyOpenGL_accelerate  # opcjonalne przyspieszenie OpenGL
 
 # --- Obliczenia numeryczne ---
 numpy          # wektory, interpolacja, macierze
