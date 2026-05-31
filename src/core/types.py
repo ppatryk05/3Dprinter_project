@@ -45,5 +45,3 @@ class PrinterConfig:
     build_y: float = 220.0
     build_z: float = 250.0
     max_feed_rate: float = 7200.0
-    max_accel: float = 3000.0
-    nozzle_clearance: float = 18.0

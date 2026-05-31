@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Generator, List
 
 from src.core.kinematics import ARC_SEGMENTS, KinematicsEngine
-from src.core.material_model import MaterialDeposition
 from src.core.thermal_model import ThermalModel
 from src.core.types import (
     HEAT_WAIT_DT,
@@ -46,13 +45,11 @@ class PrinterSimulator:
         self.config = config or PrinterConfig()
         self.kinematics = KinematicsEngine(self.config)
         self.thermal = ThermalModel()
-        self.material = MaterialDeposition()
         self.collision = CollisionDetector(self.config)
         self.frames: List[SimulationFrame] = []
 
     def run(self, commands: List[MotionCommand]) -> List[SimulationFrame]:
         self.frames.clear()
-        self.material.clear()
         self.kinematics.reset()   # clear G90/G91/M82/M83 state from previous run
         self.thermal.reset()      # clear PID integrator and thermal rate from previous run
         prev = MotionState()
@@ -114,7 +111,6 @@ class PrinterSimulator:
                 )
                 steps = max(1, int(distance / STEP_MM))
                 for interp in _lerp_states(prev, next_state, steps):
-                    self.material.update(prev, interp)
                     self.frames.append(SimulationFrame(
                         state=interp,
                         issues=issues,
@@ -134,7 +130,6 @@ class PrinterSimulator:
                     next_state = replace(next_state, e=prev.e)
 
                 for interp in _lerp_states(prev, next_state, ARC_SEGMENTS):
-                    self.material.update(prev, interp)
                     self.frames.append(SimulationFrame(
                         state=interp,
                         issues=issues,
@@ -143,7 +138,6 @@ class PrinterSimulator:
                     prev = interp
 
             else:
-                self.material.update(prev, next_state)
                 self.frames.append(SimulationFrame(
                     state=next_state,
                     issues=issues,

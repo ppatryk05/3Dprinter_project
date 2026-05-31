@@ -1,21 +1,28 @@
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
 
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
     QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QSlider,
     QVBoxLayout,
     QWidget,
 )
+
+import cv2
+import numpy as np
 
 from src.core.gcode_parser import parse_gcode_file
 from src.core.types import PrinterConfig
@@ -90,6 +97,17 @@ class _LoadingDialog(QDialog):
 # Main window
 # ---------------------------------------------------------------------------
 
+# Folder where all recordings and exports are saved automatically
+_RECORDINGS_DIR = Path(__file__).resolve().parents[2] / "recordings"
+
+
+def _auto_path(prefix: str, ext: str) -> Path:
+    """Return recordings/<prefix>_YYYYMMDD_HHMMSS.<ext>, creating folder if needed."""
+    _RECORDINGS_DIR.mkdir(exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return _RECORDINGS_DIR / f"{prefix}_{stamp}.{ext}"
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -103,6 +121,12 @@ class MainWindow(QMainWindow):
         self.last_file = Path("examples/sample.gcode")
         self._worker: _LoadWorker | None = None
         self._loading_dlg: _LoadingDialog | None = None
+
+        # Live recording state
+        self._recording      = False
+        self._rec_writer: cv2.VideoWriter | None = None
+        self._rec_path       = ""
+        self._rec_frame_cnt  = 0
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -135,17 +159,48 @@ class MainWindow(QMainWindow):
         restart_btn.clicked.connect(self.restart)
         sidebar_layout.addWidget(restart_btn)
 
-        export_btn = QPushButton("Zapisz sesję (JSON)")
-        export_btn.clicked.connect(self.export_replay)
-        sidebar_layout.addWidget(export_btn)
+        # ── Session group ─────────────────────────────────────────────
+        session_box = QGroupBox("Sesja / Nagranie")
+        session_layout = QVBoxLayout(session_box)
+        session_layout.setSpacing(4)
 
-        import_btn = QPushButton("Wczytaj sesję (JSON)")
-        import_btn.clicked.connect(self.import_replay)
-        sidebar_layout.addWidget(import_btn)
+        self._save_btn = QPushButton("Zapisz sesję (JSON)")
+        self._save_btn.setToolTip("Zapisuje wszystkie klatki symulacji do pliku JSON")
+        self._save_btn.clicked.connect(self.export_replay)
+        session_layout.addWidget(self._save_btn)
 
-        self.record_btn = QPushButton("Konwertuj sesję (JSON --> MP4)")
-        self.record_btn.clicked.connect(self.on_click_render)
-        sidebar_layout.addWidget(self.record_btn)
+        self._load_btn = QPushButton("Wczytaj i odtwórz sesję (JSON)")
+        self._load_btn.setToolTip("Wczytuje sesję z pliku JSON i automatycznie rozpoczyna odtwarzanie")
+        self._load_btn.clicked.connect(self.import_replay)
+        session_layout.addWidget(self._load_btn)
+
+        self._rec_btn = QPushButton("Nagraj od teraz")
+        self._rec_btn.setToolTip(
+            "Rozpoczyna nagrywanie na żywo od bieżącej klatki.\n"
+            "Naciśnij ponownie aby zatrzymać i zapisać wideo MP4."
+        )
+        self._rec_btn.setStyleSheet("QPushButton { color: #ff4444; font-weight: bold; }")
+        self._rec_btn.clicked.connect(self.toggle_live_record)
+        session_layout.addWidget(self._rec_btn)
+
+        self._mp4_btn = QPushButton("Eksportuj całą sesję do MP4")
+        self._mp4_btn.setToolTip(
+            "Renderuje WSZYSTKIE klatki bieżącej sesji do pliku wideo MP4.\n"
+            "Nie wymaga osobnego pliku JSON – działa na bieżących danych w pamięci."
+        )
+        self._mp4_btn.clicked.connect(self.on_click_render)
+        session_layout.addWidget(self._mp4_btn)
+
+        # Progress bar shown only during MP4 export
+        self._render_progress = QProgressBar()
+        self._render_progress.setRange(0, 100)
+        self._render_progress.setValue(0)
+        self._render_progress.setTextVisible(True)
+        self._render_progress.setFormat("Renderowanie: %p%")
+        self._render_progress.setVisible(False)
+        session_layout.addWidget(self._render_progress)
+
+        sidebar_layout.addWidget(session_box)
 
         self._speed_label = QLabel("Prędkość: 5×")
         sidebar_layout.addWidget(self._speed_label)
@@ -309,17 +364,21 @@ class MainWindow(QMainWindow):
             if self.frame_idx >= len(self.frames):
                 self.playing = False
                 self.status_label.setText("Druk zakończony")
+                if self._recording:
+                    self._stop_live_record()
                 break
             previous = self.frames[self.frame_idx - 1] if self.frame_idx > 0 else None
             frame    = self.frames[self.frame_idx]
             self.scene.update_frame(previous, frame)
 
             s    = frame.state
+            rec_tag = f"  [REC {self._rec_frame_cnt}]" if self._recording else ""
             info = (
                 f"t={s.t:.1f}s  "
                 f"X={s.x:.1f}  Y={s.y:.1f}  Z={s.z:.2f}  "
                 f"E={s.e:.2f}  "
                 f"Dysza={s.nozzle_temp:.0f}°C  Stół={s.bed_temp:.0f}°C"
+                f"{rec_tag}"
             )
             if frame.issues:
                 info = "⚠ " + " | ".join(frame.issues) + "  |  " + info
@@ -327,6 +386,77 @@ class MainWindow(QMainWindow):
             self._update_stats(frame)
             self.frame_idx += 1
 
+        # Capture one video frame per timer tick (not per simulation step)
+        # This gives smooth ~30fps video regardless of playback speed setting
+        if self._recording and self.playing:
+            self._capture_live_frame()
+
+    # ------------------------------------------------------------------
+    # Live recording
+    # ------------------------------------------------------------------
+    def toggle_live_record(self) -> None:
+        if self._recording:
+            self._stop_live_record()
+        else:
+            self._start_live_record()
+
+    def _start_live_record(self) -> None:
+        if not self.frames:
+            self.status_label.setText("Brak sesji – załaduj G-code aby móc nagrywać.")
+            return
+
+        mp4_path = _auto_path("nagranie", "mp4")
+
+        self._rec_path      = str(mp4_path)
+        self._rec_frame_cnt = 0
+        self._rec_writer    = None   # writer created on first frame (need widget size)
+        self._recording     = True
+
+        if not self.playing:
+            self.playing = True
+
+        self._rec_btn.setText("Zatrzymaj nagrywanie")
+        self._rec_btn.setStyleSheet(
+            "QPushButton { background-color: #8b0000; color: white; font-weight: bold; }"
+        )
+        self.status_label.setText(f"[REC] Nagrywanie → recordings/{mp4_path.name}")
+
+    def _capture_live_frame(self) -> None:
+        """Grab the current OpenGL viewport and write it to the video file."""
+        self.scene.repaint()
+        pixmap  = self.scene.grab()
+        qimage  = pixmap.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+
+        w = qimage.width()  - (qimage.width()  % 2)
+        h = qimage.height() - (qimage.height() % 2)
+
+        if self._rec_writer is None:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            self._rec_writer = cv2.VideoWriter(
+                self._rec_path, fourcc, 30, (w, h)
+            )
+
+        ptr = qimage.bits()
+        ptr.setsize(qimage.sizeInBytes())
+        arr = np.array(ptr).reshape(qimage.height(), qimage.width(), 4)
+        self._rec_writer.write(cv2.cvtColor(arr[:h, :w], cv2.COLOR_RGBA2BGR))
+        self._rec_frame_cnt += 1
+
+    def _stop_live_record(self) -> None:
+        self._recording = False
+        if self._rec_writer is not None:
+            self._rec_writer.release()
+            self._rec_writer = None
+        self._rec_btn.setText("Nagraj od teraz")
+        self._rec_btn.setStyleSheet(
+            "QPushButton { color: #ff4444; font-weight: bold; }"
+        )
+        self.status_label.setText(
+            f"Nagranie zapisane: {Path(self._rec_path).name}  "
+            f"({self._rec_frame_cnt} klatek)"
+        )
+
+    # ------------------------------------------------------------------
     def _update_stats(self, frame: SimulationFrame) -> None:
         s = frame.state
         total = max(1, len(self.frames))
@@ -374,41 +504,46 @@ class MainWindow(QMainWindow):
         self.scene.reset_scene()
         self._refresh_charts()
         self.status_label.setText(
-            f"Sesja wczytana: {Path(filename).name}  ({len(frames)} kroków)"
+            f"Sesja wczytana: {Path(filename).name}  ({len(frames)} kroków) – odtwarzanie…"
         )
+        # Auto-start playback so loading a session feels like pressing Play
+        self.playing = True
 
+    # ------------------------------------------------------------------
+    # MP4 export (works on the frames currently in memory)
+    # ------------------------------------------------------------------
     def on_click_render(self) -> None:
-        # Jeśli renderowanie już trwa, kliknięcie oznacza akcję "Anuluj"
-        if hasattr(self, '_render_timer') and self._render_timer.isActive():
+        # If rendering is already in progress, cancel it
+        if hasattr(self, "_render_timer") and self._render_timer.isActive():
             self._render_timer.stop()
-            if hasattr(self, '_render_manager') and self._render_manager:
+            if getattr(self, "_render_manager", None):
                 self._render_manager.close()
-            self.status_label.setText("Renderowanie zostało przerwane przez użytkownika.")
+            self.status_label.setText("Renderowanie przerwane.")
             self._cleanup_render_ui()
             return
 
-        json_file, _ = QFileDialog.getOpenFileName(self, "Wybierz plik sesji JSON", "", "JSON (*.json)")
-        if not json_file: return
+        if not self.frames:
+            self.status_label.setText("Brak sesji do eksportu – załaduj G-code lub sesję JSON.")
+            return
 
-        mp4_file, _ = QFileDialog.getSaveFileName(self, "Zapisz wideo jako...", "render.mp4", "Wideo MP4 (*.mp4)")
-        if not mp4_file: return
+        mp4_path = _auto_path("export", "mp4")
 
         try:
-            self._render_manager = VideoRenderManager(self.scene, json_file, mp4_file, fps=60, step=10)
-        except Exception as e:
-            self.status_label.setText(f"Błąd inicjalizacji managera: {str(e)}")
+            self._render_manager = VideoRenderManager(
+                self.scene, self.frames, mp4_path, fps=60, step=10
+            )
+        except Exception as exc:
+            self.status_label.setText(f"Błąd inicjalizacji renderowania: {exc}")
             return
 
-        if self._render_manager.total_frames == 0:
-            self.status_label.setText("Błąd: Wybrany plik JSON nie zawiera klatek.")
-            return
-
-        # Zmiana wyglądu okna (UI) na czas pracy
+        # Freeze simulation and update UI
+        self.playing = False
         self.load_btn.setEnabled(False)
-        self.record_btn.setText("Anuluj renderowanie")
-        self.status_label.setText("Rozpoczynam renderowanie klatek...")
+        self._mp4_btn.setText("Anuluj renderowanie")
+        self._render_progress.setValue(0)
+        self._render_progress.setVisible(True)
+        self.status_label.setText("Renderowanie MP4…")
 
-        # Uruchomienie cyklicznego timera okna
         self._render_timer = QTimer(self)
         self._render_timer.timeout.connect(self._on_render_timer_tick)
         self._render_timer.start(0)
@@ -416,17 +551,25 @@ class MainWindow(QMainWindow):
     def _on_render_timer_tick(self) -> None:
         current, total = self._render_manager.render_next_step()
 
-        if current % 5 == 0 or current == total:
-            percentage = (current / total) * 100
-            self.status_label.setText(f"Renderowanie MP4: {current}/{total} klatek ({percentage:.1f}%)")
+        pct = int(current / max(total, 1) * 100)
+        self._render_progress.setValue(pct)
+
+        if current % 20 == 0 or current == total:
+            self.status_label.setText(
+                f"Renderowanie MP4: {current}/{total} klatek ({pct}%)"
+            )
 
         if self._render_manager.is_finished():
             self._render_timer.stop()
+            saved = Path(self._render_manager.output_path).name
             self._render_manager.close()
-            self.status_label.setText("Sukces! Wideo zostało pomyślnie zapisane.")
+            self.status_label.setText(
+                f"Eksport gotowy → recordings/{saved}  ({total} klatek)"
+            )
             self._cleanup_render_ui()
 
     def _cleanup_render_ui(self) -> None:
         self.load_btn.setEnabled(True)
-        self.record_btn.setText("Konwertuj sesję (JSON --> MP4)")
+        self._mp4_btn.setText("Eksportuj całą sesję do MP4")
+        self._render_progress.setVisible(False)
         self._render_manager = None

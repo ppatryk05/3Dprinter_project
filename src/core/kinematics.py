@@ -69,7 +69,6 @@ class KinematicsEngine:
                      ) -> MotionState:
         """Apply a single linear G0/G1 move."""
         next_state = replace(state)
-        alarms: list[str] = []
 
         if cmd.f is not None:
             next_state.feed_rate = self._clamp(cmd.f, 1.0, self.config.max_feed_rate)
