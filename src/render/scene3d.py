@@ -198,25 +198,44 @@ class Scene3DWidget(gl.GLViewWidget):
     # ------------------------------------------------------------------
     def _build_dynamic(self) -> None:
         bx, M = self.BX, self.MARGIN
+        by = self.BY
         RY = self.ROD_Y_OFFSET
 
         # ── Gantry: two X-rail profiles + two Z-carriage blocks ──────────
         #  X-rails span the full width (column-to-column), depth 14 mm, height 12 mm
         #  Z-carriages sit at each end column, depth spans both rails + gap
         XRAIL_LEN = bx + 2 * M          # e.g. 256 mm  (column centre to centre)
+        YRAIL_LEN = by + 2 * M
         XRAIL_D   = 14.0
         XRAIL_H   = 12.0
+        YRAIL_D   = 14.0
+        YRAIL_H   = 12.0
         ZCAR_W    = 24.0
         ZCAR_D    = RY * 2 + XRAIL_D    # 50 mm – spans both rails
         ZCAR_H    = 22.0
+        YCAR_H = 22.0
+        YCAR_W = 20.0
+        YCAR_D = 20.0
 
         self._xrail_f = _mesh(XRAIL_LEN, XRAIL_D, XRAIL_H, C_XRAIL,
                               edges=True, ec=(0, 0, 0, 0.22))
         self._xrail_b = _mesh(XRAIL_LEN, XRAIL_D, XRAIL_H, C_XRAIL,
                               edges=True, ec=(0, 0, 0, 0.22))
+        self._yrail_l = _mesh(YRAIL_D, YRAIL_LEN, YRAIL_H, C_XRAIL,
+                              edges=True, ec=(0, 0, 0, 0.22))
+        self._yrail_r = _mesh(YRAIL_D, YRAIL_LEN, YRAIL_H, C_XRAIL,
+                              edges=True, ec=(0, 0, 0, 0.22))
         self._zcar_l  = _mesh(ZCAR_W, ZCAR_D, ZCAR_H, C_ZCAR,
                               edges=True, ec=(0, 0, 0, 0.28))
         self._zcar_r  = _mesh(ZCAR_W, ZCAR_D, ZCAR_H, C_ZCAR,
+                              edges=True, ec=(0, 0, 0, 0.28))
+        self._ycar_fl  = _mesh(YCAR_W, YCAR_D, YCAR_H, C_ZCAR,
+                              edges=True, ec=(0, 0, 0, 0.28))
+        self._ycar_fr  = _mesh(YCAR_W, YCAR_D, YCAR_H, C_ZCAR,
+                              edges=True, ec=(0, 0, 0, 0.28))
+        self._ycar_bl  = _mesh(YCAR_W, YCAR_D, YCAR_H, C_ZCAR,
+                              edges=True, ec=(0, 0, 0, 0.28))
+        self._ycar_br  = _mesh(YCAR_W, YCAR_D, YCAR_H, C_ZCAR,
                               edges=True, ec=(0, 0, 0, 0.28))
 
         # ── Toolhead carriage ────────────────────────────────────────────
@@ -286,7 +305,10 @@ class Scene3DWidget(gl.GLViewWidget):
             self._shadow_lines,
             self._deposition, self._support_lines, self._travel_lines,
             self._xrail_f, self._xrail_b,
+            self._yrail_l, self._yrail_r,
             self._zcar_l, self._zcar_r,
+            self._ycar_fl, self._ycar_bl,
+            self._ycar_fr, self._ycar_br,
             self._toolhead, self._fan_body,
             *self._fins,
             self._heat_break, self._heater_blk,
@@ -301,7 +323,9 @@ class Scene3DWidget(gl.GLViewWidget):
     def _update_moving_parts(self, x: float, y: float, z: float,
                               extruding: bool) -> None:
         bx, M = self.BX, self.MARGIN
+        by = self.BY
         cx  = bx / 2
+        cy = by / 2
         RY  = self.ROD_Y_OFFSET
         RZ  = z + self.ROD_Z_OFFSET
         yf  = y - RY
@@ -311,9 +335,21 @@ class Scene3DWidget(gl.GLViewWidget):
         self._xrail_f.resetTransform(); self._xrail_f.translate(cx, yf, RZ)
         self._xrail_b.resetTransform(); self._xrail_b.translate(cx, yb, RZ)
 
+        # Y-rail beams (front + back), centred in Y and X, moving with Z
+        self._yrail_l.resetTransform(); self._yrail_l.translate(-M, cy, RZ)
+        self._yrail_r.resetTransform(); self._yrail_r.translate(bx+M, cy, RZ)
+
         # Z-carriages at column positions (left=-M, right=BX+M), moving with Y and Z
         self._zcar_l.resetTransform();  self._zcar_l.translate(-M,   y, RZ)
         self._zcar_r.resetTransform();  self._zcar_r.translate(bx+M, y, RZ)
+
+        # Y-carriages at column positions (left=-M, right=BX+M), moving with Z
+        self._ycar_fl.resetTransform();  self._ycar_fl.translate(-M, -M, RZ)
+        self._ycar_bl.resetTransform();  self._ycar_bl.translate(-M, by + M, RZ)
+
+        # Y-carriages at column positions (left=-M, right=BX+M), moving with Z
+        self._ycar_fr.resetTransform();  self._ycar_fr.translate(bx+M, -M, RZ)
+        self._ycar_br.resetTransform();  self._ycar_br.translate(bx+M, by + M, RZ)
 
         # Toolhead carriage — z+44..z+74, rods at z+63 pass through it
         th_cz = z + 59
